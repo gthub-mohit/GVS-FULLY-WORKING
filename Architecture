@@ -1,0 +1,570 @@
+# System Architecture & Topology
+
+The **Galvanic Vestibular Stimulation (GVS)** system is designed to deliver controlled, bidirectional DC microcurrent through electrodes positioned over the mastoid regions behind the ears.
+
+The system is built around an **ESP32 controller**, a **3S LiPo power source**, and a **discrete BJT H-bridge** capable of reversing the direction of current through the load.
+
+> **⚠️ Safety Note:** This architecture is a prototype intended for controlled experimental development. Any system that applies electrical current to the human body requires appropriate electrical isolation, current limiting, fault detection, electrode/contact monitoring, and validation before human use.
+
+---
+
+## 1. System Components
+
+| Component           | Description                                                    |
+| ------------------- | -------------------------------------------------------------- |
+| **Controller**      | ESP32 with 3.3 V logic, dual onboard 8-bit DACs and 12-bit ADC |
+| **Power Supply**    | 11.1 V nominal 3S LiPo battery                                 |
+| **High-Side Stage** | Two PNP BJTs (`Q1`, `Q2`)                                      |
+| **Low-Side Stage**  | Two NPN BJTs (`Q3`, `Q4`) configured as current sinks          |
+| **Level Shifting**  | Two NPN BJTs (`Q5`, `Q6`) for driving the high-side PNP bases  |
+| **Current Sense**   | Shared 1 kΩ emitter/sense resistor                             |
+| **ADC Feedback**    | ESP32 GPIO 34                                                  |
+| **Control DACs**    | GPIO 25 and GPIO 26                                            |
+
+---
+
+## 2. System Topology
+
+```text
+                    +11.1 V (3S LiPo)
+                       │          │
+                    ┌──┴──┐    ┌──┴──┐
+                    │ Q1  │    │ Q2  │
+                    │ PNP │    │ PNP │
+                    └──┬──┘    └──┬──┘
+                       │           │
+                    Node A       Node B
+                       │           │
+                       │   [ LOAD ]│
+                       │   (Head)  │
+                       │           │
+                    ┌──┴──┐    ┌──┴──┐
+                    │ Q3  │    │ Q4  │
+                    │ NPN │    │ NPN │
+                    │Sink │    │Sink │
+                    └──┬──┘    └──┬──┘
+                       └─────┬─────┘
+                             │
+                          [ Re ]
+                           1 kΩ
+                        Current Sense
+                             │
+                            GND
+                             │
+                             └──────> GPIO 34 (ADC)
+```
+
+The load is connected between **Node A** and **Node B**. By selecting which high-side transistor supplies the load and which low-side transistor regulates the return current, the direction of current through the load can be reversed.
+
+---
+
+# 3. Stage-by-Stage Circuit Breakdown
+
+## 3.1 High-Side PNP Switches & Level Shifters
+
+### High-Side Transistors
+
+* `Q1` controls **Node A**
+* `Q2` controls **Node B**
+
+The emitters of both PNP transistors are connected to the `+11.1 V` supply rail.
+
+### The Voltage Problem
+
+The ESP32 operates with **3.3 V logic**, while the PNP emitters are at approximately `11.1 V`.
+
+Directly connecting an ESP32 GPIO to a PNP base would not provide a proper way to pull the base up to the emitter voltage and turn the transistor OFF.
+
+For example:
+
+```text
+PNP emitter = 11.1 V
+ESP32 HIGH  = 3.3 V
+
+V_E - V_B = 11.1 - 3.3
+          = 7.8 V
+```
+
+This would keep the PNP base substantially below its emitter and can force the transistor ON.
+
+### NPN Level-Shifter Solution
+
+Two NPN transistors (`Q5` and `Q6`) are used as level-shifting stages.
+
+```text
+ESP32 GPIO 32 ──> Q5 ──> Q1 PNP Base
+ESP32 GPIO 33 ──> Q6 ──> Q2 PNP Base
+```
+
+#### Q1 / Node A
+
+When **GPIO 32 (HSA)** is HIGH:
+
+```text
+GPIO 32 = HIGH
+     │
+     ▼
+    Q5 ON
+     │
+     ▼
+Q1 base pulled LOW
+     │
+     ▼
+Q1 PNP turns ON
+     │
+     ▼
+Node A ≈ +11.1 V
+```
+
+When GPIO 32 is LOW:
+
+```text
+GPIO 32 = LOW
+     │
+     ▼
+    Q5 OFF
+     │
+     ▼
+Q1 base pulled toward +11.1 V
+     │
+     ▼
+Q1 turns OFF
+```
+
+`Q6` provides the equivalent level-shifting function for `Q2` using **GPIO 33 (HSB)**.
+
+---
+
+# 4. Low-Side Constant-Current Sinks
+
+The low-side NPN transistors (`Q3` and `Q4`) are operated in their **linear region** rather than simply being used as digital ON/OFF switches.
+
+Their purpose is to regulate the current flowing through the load.
+
+### Connections
+
+```text
+DAC GPIO 26 ──> Q3 Base
+DAC GPIO 25 ──> Q4 Base
+
+Q3 Collector ──> Node A
+Q4 Collector ──> Node B
+
+Q3 Emitter ──┐
+             ├──> Re = 1 kΩ ──> GND
+Q4 Emitter ──┘
+```
+
+The DAC output establishes the approximate voltage at the transistor base. The emitter voltage follows the base voltage by approximately one base-emitter drop.
+
+### Approximate Current Relationship
+
+For an NPN transistor operating in the intended linear region:
+
+```text
+V_Re ≈ V_DAC - V_BE
+```
+
+With:
+
+```text
+V_BE ≈ 0.7 V
+Re   = 1 kΩ
+```
+
+The approximate sink current is:
+
+```text
+I_sink ≈ (V_DAC - 0.7 V) / 1000 Ω
+```
+
+### Example
+
+For a DAC output of approximately `2.2 V`:
+
+```text
+V_Re = 2.2 V - 0.7 V
+     = 1.5 V
+
+I_sink = 1.5 V / 1000 Ω
+       = 1.5 mA
+```
+
+The transistor absorbs the remaining voltage as `VCE`, allowing the current to remain approximately regulated as the load impedance changes, provided sufficient voltage compliance remains available.
+
+> **Important:** The `VBE ≈ 0.7 V` relationship is only an approximation. Actual current depends on transistor characteristics, temperature, DAC accuracy, resistor tolerance, and available compliance voltage. The system should therefore be calibrated experimentally rather than relying solely on the theoretical equation.
+
+---
+
+# 5. The Load
+
+The load is connected between **Node A** and **Node B**.
+
+Electrodes are positioned over the mastoid regions behind the ears.
+
+A simplified electrical representation of the electrode-skin interface can be modeled using resistive and capacitive elements, with additional resistance contributed by underlying tissue.
+
+```text
+       Electrode
+          │
+     ┌────┴────┐
+     │         │
+    Rskin    Cskin
+     │         │
+     └────┬────┘
+          │
+       Rtissue
+          │
+        Tissue
+```
+
+The effective impedance of the electrode-skin interface can vary significantly with:
+
+* Skin condition
+* Electrode material and area
+* Conductive medium
+* Contact pressure
+* Electrode placement
+* Movement
+* Sweat and moisture
+
+Therefore, the power supply must provide sufficient **compliance voltage**, while the control system must maintain appropriate current limiting and fault protection.
+
+---
+
+# 6. Closed-Loop Current Sensing
+
+A shared `1 kΩ` sense resistor (`Re`) is used to monitor the current flowing through the active low-side sink.
+
+The voltage across `Re` is measured by the ESP32 ADC on:
+
+```text
+GPIO 34 → ADC → SENSE
+```
+
+Because:
+
+```text
+Re = 1000 Ω
+```
+
+the current can be estimated from the measured sense voltage:
+
+```text
+I = V_sense / Re
+```
+
+When voltage is expressed in millivolts:
+
+```text
+I (mA) = V_sense (mV) / 1000
+```
+
+### Example
+
+If the ADC measures:
+
+```text
+V_sense = 1.5 V
+        = 1500 mV
+```
+
+then:
+
+```text
+I = 1500 / 1000
+  = 1.5 mA
+```
+
+The firmware periodically samples this voltage using the ESP32 ADC and uses it as a diagnostic measurement of the actual sink current.
+
+---
+
+# 7. Operating Modes & Current Flow
+
+The bridge provides three primary operating states.
+
+| Mode        | High-Side | Active Sink | Current Path                                            | Polarity        |
+| ----------- | --------- | ----------- | ------------------------------------------------------- | --------------- |
+| **LEFT**    | `Q1` ON   | `Q4`        | `+11.1 V → Q1 → Node A → Load → Node B → Q4 → Re → GND` | Node A → Node B |
+| **RIGHT**   | `Q2` ON   | `Q3`        | `+11.1 V → Q2 → Node B → Load → Node A → Q3 → Re → GND` | Node B → Node A |
+| **NEUTRAL** | OFF       | OFF         | No active supply path                                   | 0 mA            |
+
+### LEFT Mode
+
+```text
++11.1 V
+   │
+  Q1
+   │
+   ▼
+Node A (+)
+   │
+   │
+ [ LOAD ]
+   │
+   ▼
+Node B (-)
+   │
+  Q4
+   │
+  Re
+   │
+  GND
+```
+
+Current flows from **Node A → Node B**.
+
+### RIGHT Mode
+
+```text
++11.1 V
+   │
+  Q2
+   │
+   ▼
+Node B (+)
+   │
+   │
+ [ LOAD ]
+   │
+   ▼
+Node A (-)
+   │
+  Q3
+   │
+  Re
+   │
+  GND
+```
+
+Current flows from **Node B → Node A**.
+
+### NEUTRAL Mode
+
+All bridge drive signals are disabled:
+
+```text
+Q1 = OFF
+Q2 = OFF
+Q3 = OFF
+Q4 = OFF
+```
+
+The intended load current is:
+
+```text
+I ≈ 0 mA
+```
+
+---
+
+# 8. Switching Safety — Deadtime
+
+The bridge must **never transition directly from one polarity to the opposite polarity** while active devices from the previous state are still conducting.
+
+The firmware therefore inserts an intermediate OFF period between polarity changes.
+
+### Deadtime Sequence
+
+```text
+LEFT
+  │
+  ▼
+ALL OFF
+  │
+  │  Deadtime
+  │  20–40 ms
+  ▼
+RIGHT
+```
+
+Similarly:
+
+```text
+RIGHT
+  │
+  ▼
+ALL OFF
+  │
+  │  Deadtime
+  │  20–40 ms
+  ▼
+LEFT
+```
+
+During the deadtime interval:
+
+```text
+HSA = LOW
+HSB = LOW
+DAC outputs disabled / set to safe state
+```
+
+This provides a controlled transition between bridge polarities and reduces the possibility of unintended simultaneous conduction.
+
+---
+
+# 9. Current Ramping
+
+Rather than commanding a large current change instantaneously, the firmware uses a short **DAC ramp**.
+
+Example:
+
+```text
+0 mA
+ ↓
+Step 1
+ ↓
+Step 2
+ ↓
+Step 3
+ ↓
+Step 4
+ ↓
+Step 5
+ ↓
+Target Current
+```
+
+A representative implementation uses:
+
+```text
+6 discrete DAC steps
+≈ 60 ms total ramp duration
+```
+
+This produces a gradual transition instead of an abrupt current command.
+
+> The exact ramp profile should be determined experimentally and validated for the intended application. A software ramp should not be treated as a substitute for hardware current limiting or independent safety protection.
+
+---
+
+# 10. Fault Detection
+
+The ESP32 continuously monitors the voltage across the shared sense resistor.
+
+If the measured current exceeds a predefined software fault threshold for multiple consecutive samples, the firmware executes:
+
+```cpp
+allOff();
+```
+
+which disables the bridge drive signals.
+
+Conceptually:
+
+```text
+ADC Measurement
+       │
+       ▼
+Calculate Current
+       │
+       ▼
+I > Fault Threshold?
+       │
+    ┌──┴──┐
+   NO     YES
+    │      │
+    │      ▼
+    │   Fault Counter
+    │      │
+    │      ▼
+    │   allOff()
+    │
+    ▼
+Continue
+```
+
+This provides an additional software-based protection layer against abnormal current conditions.
+
+> **Safety-critical note:** ESP32 firmware monitoring alone should not be considered a sufficient human-safety mechanism. A hardware-enforced current limit, appropriate isolation, watchdog/fail-safe behavior, and validated fault response are recommended for any system intended to interface with a person.
+
+---
+
+# 11. ESP32 Pin Mapping
+
+| ESP32 GPIO  | Function      | Connected To                |
+| ----------- | ------------- | --------------------------- |
+| **GPIO 25** | DAC1          | `Q4` base                   |
+| **GPIO 26** | DAC2          | `Q3` base                   |
+| **GPIO 32** | HSA           | `Q5 → Q1` high-side control |
+| **GPIO 33** | HSB           | `Q6 → Q2` high-side control |
+| **GPIO 34** | ADC / SENSE   | Voltage across `Re`         |
+| **GND**     | Common Ground | Circuit ground              |
+
+---
+
+# 12. Complete Control Architecture
+
+```text
+                    ┌──────────────────────┐
+                    │        ESP32         │
+                    │                      │
+                    │ GPIO 32 ── HSA       │
+                    │ GPIO 33 ── HSB       │
+                    │ GPIO 25 ── DAC1      │
+                    │ GPIO 26 ── DAC2      │
+                    │ GPIO 34 ── SENSE     │
+                    └──────────┬───────────┘
+                               │
+             ┌─────────────────┼─────────────────┐
+             │                 │                 │
+             ▼                 ▼                 ▼
+       High-Side          DAC Current       ADC Feedback
+       Control             Control             │
+             │                 │                │
+        ┌────┴────┐       ┌────┴────┐           │
+        │ Q5  Q6  │       │ Q3  Q4  │           │
+        └────┬────┘       └────┬────┘           │
+             │                 │                │
+        ┌────┴────┐            │                │
+        │ Q1  Q2  │            │                │
+        │ PNP PNP │            │                │
+        └────┬────┘            │                │
+             │                 │                │
+             ▼                 ▼                │
+          Node A             Node B             │
+             │                 │                │
+             └───────[ LOAD ]──┘                │
+                         │                      │
+                         ▼                      │
+                    Q3 / Q4 Sink               │
+                         │                      │
+                       Re 1kΩ ──────────────────┘
+                         │
+                        GND
+```
+
+---
+
+# 13. Design Summary
+
+The system combines:
+
+* **ESP32 digital control**
+* **Dual DAC-based current control**
+* **Discrete BJT H-bridge topology**
+* **NPN level shifting for high-side PNP control**
+* **Shared emitter current sensing**
+* **Bidirectional load current**
+* **Software-controlled deadtime**
+* **Controlled current ramping**
+* **ADC-based fault detection**
+
+The overall architecture can be summarized as:
+
+```text
+ESP32
+  │
+  ├── High-Side Control ──> PNP H-Bridge
+  │
+  ├── DAC Control ─────────> NPN Current Sinks
+  │
+  └── ADC Feedback <─────── Current Sense Resistor
+                                │
+                                ▼
+                              LOAD
+```
+
+The combination of **direction control, current regulation, feedback monitoring, and controlled switching** forms the core of the prototype GVS control architecture.
