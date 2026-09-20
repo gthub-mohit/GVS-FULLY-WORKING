@@ -5,8 +5,8 @@
 #include "soc/rtc_cntl_reg.h"
 
 // ─────────────── WI-FI CREDENTIALS ───────────────
-const char* SSID     = "realme12";
-const char* PASSWORD = "123456789";
+const char* SSID     = "YOUR WIFI NAME";
+const char* PASSWORD = "YOUR WIFI PASS";
 const int   UDP_PORT = 5005;
 
 WiFiUDP udp;
